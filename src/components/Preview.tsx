@@ -23,6 +23,20 @@ export default function Preview({ task }: PreviewProps) {
     knowledgeBase.getTemplates().then(setTemplates).catch(() => setTemplates([]));
   }, [task?.id]);
 
+  // Auto-load current stage output document
+  useEffect(() => {
+    if (!task?.currentStageId) return;
+    const currentStage = task.stages.find((s) => s.id === task.currentStageId);
+    if (!currentStage || currentStage.outputs.length === 0) return;
+
+    // Load the first output file of the current stage
+    const firstOutput = currentStage.outputs[0];
+    handleFileClick(firstOutput.path, firstOutput.name).catch(() => {
+      // File may not exist yet, ignore error
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [task?.currentStageId, task?.id]);
+
   const handleFileClick = useCallback(
     async (outputPath: string, outputName: string) => {
       if (!task) return;

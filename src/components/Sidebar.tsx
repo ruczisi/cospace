@@ -389,17 +389,11 @@ export default function Sidebar({
                 <div className="bg-gray-900 rounded p-3">
                   <div className="flex items-center justify-between mb-3">
                     <h3 className="text-xs font-medium text-primary-400">🤖 LLM 配置（意图解析）</h3>
-                    {!config ? null : config.agent?.type === 'builtin' ? (
-                      <span className="text-[10px] px-1.5 py-0.5 bg-red-900/50 text-red-300 rounded">必需</span>
-                    ) : (
-                      <span className="text-[10px] px-1.5 py-0.5 bg-gray-700 text-gray-400 rounded">可选</span>
-                    )}
+                    <span className="text-[10px] px-1.5 py-0.5 bg-gray-700 text-gray-400 rounded">可选</span>
                   </div>
-                  {config && config.agent?.type !== 'builtin' && (
-                    <p className="text-[10px] text-gray-500 mb-3">
-                      当前使用外部 Agent 工具（{config.agent?.type === 'claude' ? 'Claude Code' : config.agent?.type === 'codex' ? 'Codex' : '自定义'}），LLM 仅用于意图解析。不配置也可使用基础功能。
-                    </p>
-                  )}
+                  <p className="text-[10px] text-gray-500 mb-3">
+                    当前使用 {config?.agent?.type === 'claude' ? 'Claude Code' : config?.agent?.type === 'codex' ? 'Codex' : '自定义'} Agent，LLM 仅用于意图解析。不配置也可使用基础功能。
+                  </p>
 
                   {!config ? (
                     <div className="text-xs text-gray-500 text-center py-2">加载中...</div>
@@ -501,7 +495,6 @@ export default function Sidebar({
                           }
                           className="w-full text-xs bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-gray-200 focus:outline-none focus:border-primary-500"
                         >
-                          <option value="builtin">内置 LLM（直接调用 API）</option>
                           <option value="claude">Claude Code</option>
                           <option value="codex">Codex</option>
                           <option value="custom">自定义</option>

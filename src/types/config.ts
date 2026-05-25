@@ -27,7 +27,7 @@ export interface GlobalConfig {
   /** Agent 配置 */
   agent?: {
     /** 默认 Agent 类型 */
-    type: 'builtin' | 'claude' | 'codex' | 'custom';
+    type: 'claude' | 'codex' | 'custom';
     /** 是否自动启动 Agent */
     autoStart: boolean;
     /** 自定义命令（当 type 为 custom 时） */

@@ -10,7 +10,7 @@ import SessionHistoryPanel from './SessionHistoryPanel';
 import type { ChatMessageData } from './ChatMessage';
 
 interface WorkbenchProps {
-  task: Task;
+  task?: Task | null;
   onStartStage?: (stageId: string) => void;
   onCompleteStage?: (stageId: string) => void;
   onJumpStage?: (stageId: string) => void;
@@ -20,13 +20,10 @@ interface WorkbenchProps {
   // Agent runner props
   agentSession?: AgentSession | null;
   agentRunning?: boolean;
-  canResumeAgent?: boolean;
   agentOutput?: string[];
   agentKeyInfos?: AgentKeyInfo[];
   onStartAgent?: () => void;
   onStopAgent?: () => void;
-  onPauseAgent?: () => void;
-  onResumeAgent?: () => void;
   onSendAgentInput?: (input: string) => void;
   // Session history
   historyEntries?: ContextEntry[];
@@ -46,13 +43,10 @@ export default function Workbench({
   chatLoading = false,
   agentSession = null,
   agentRunning = false,
-  canResumeAgent = false,
   agentOutput = [],
   agentKeyInfos = [],
   onStartAgent,
   onStopAgent,
-  onPauseAgent,
-  onResumeAgent,
   onSendAgentInput,
   historyEntries = [],
   onExportTask,
@@ -60,16 +54,54 @@ export default function Workbench({
 }: WorkbenchProps) {
   const [activePanel, setActivePanel] = useState<'chat' | 'agent-run' | 'agent-ctx' | 'history'>('chat');
 
-  const currentStage = task.currentStageId
+  const currentStage = task?.currentStageId
     ? task.stages.find((s) => s.id === task.currentStageId)
     : undefined;
 
-  const isTaskCompleted = task.status === 'completed';
+  const isTaskCompleted = task?.status === 'completed';
+
+  // No task state: simplified chat-only interface
+  if (!task) {
+    return (
+      <div className="flex-1 flex flex-col bg-gray-900 text-gray-100 overflow-hidden">
+        {/* Header */}
+        <div className="p-4 border-b border-gray-700 shrink-0">
+          <div>
+            <h1 className="text-lg font-semibold text-primary-400">新建任务</h1>
+            <p className="text-sm text-gray-400 mt-1">在下方输入框描述你的需求，我将自动为你创建任务</p>
+          </div>
+        </div>
+
+        {/* Chat area - flex layout, fills all available space */}
+        <div className="flex-1 flex flex-col min-h-0">
+          {/* Chat Messages - fills space above input, scrollable */}
+          <div className="flex-1 overflow-y-auto p-4 min-h-0">
+            {chatMessages.length === 0 ? (
+              <div className="h-full flex items-center justify-center text-gray-500">
+                <div className="text-center">
+                  <p className="text-sm mb-2">💡 试试这些指令：</p>
+                  <div className="space-y-1 text-xs text-gray-600">
+                    <p>"帮我写个贵港供销社合作方案"</p>
+                    <p>"帮我做一个项目计划"</p>
+                    <p>"开始需求确认阶段"</p>
+                  </div>
+                </div>
+              </div>
+            ) : (
+              chatMessages.map((msg) => <ChatMessage key={msg.id} message={msg} />)
+            )}
+          </div>
+          {/* Chat Input - pinned to bottom */}
+          <ChatInput onSend={onSendChat || (() => {})} disabled={chatLoading} />
+        </div>
+      </div>
+    );
+  }
 
   return (
-    <div className="flex-1 flex flex-col bg-gray-900 text-gray-100">
+    <div className="flex-1 flex flex-col bg-gray-900 text-gray-100 overflow-hidden">
       {/* Header */}
-      <div className="p-4 border-b border-gray-700">
+      <div className="p-4 border-b border-gray-700 shrink-0">
         <div className="flex items-center justify-between">
           <div>
             <h1 className="text-lg font-semibold text-primary-400">{task.name}</h1>
@@ -98,7 +130,7 @@ export default function Workbench({
       </div>
 
       {/* Stage Progress */}
-      <div className="p-4 border-b border-gray-700">
+      <div className="p-4 border-b border-gray-700 shrink-0">
         <div className="flex items-center gap-2">
           {task.stages.map((stage, index) => (
             <div key={stage.id} className="flex items-center">
@@ -138,7 +170,7 @@ export default function Workbench({
       </div>
 
       {/* Active Stage Control */}
-      <div className="p-4 border-b border-gray-700 bg-gray-800">
+      <div className="p-4 border-b border-gray-700 bg-gray-800 shrink-0">
         {isTaskCompleted ? (
           <div className="text-center py-2">
             <span className="text-green-400 font-medium">🎉 所有阶段已完成</span>
@@ -196,7 +228,7 @@ export default function Workbench({
       </div>
 
       {/* Panel Tabs */}
-      <div className="flex border-b border-gray-700 bg-gray-800 items-center">
+      <div className="flex border-b border-gray-700 bg-gray-800 items-center shrink-0">
         <button
           onClick={() => setActivePanel('chat')}
           className={`flex-1 py-2 text-xs font-medium ${
@@ -252,11 +284,11 @@ export default function Workbench({
       </div>
 
       {/* Panel Content */}
-      <div className="flex-1 flex flex-col min-h-0">
+      <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
         {activePanel === 'chat' && (
           <>
-            {/* Chat Messages */}
-            <div className="flex-1 overflow-y-auto p-4">
+            {/* Chat Messages - fills panel content, scrollable */}
+            <div className="flex-1 overflow-y-auto p-4 min-h-0">
               {chatMessages.length === 0 ? (
                 <div className="h-full flex items-center justify-center text-gray-500">
                   <div className="text-center">
@@ -275,7 +307,7 @@ export default function Workbench({
                 ))
               )}
             </div>
-            {/* Chat Input */}
+            {/* Chat Input - pinned to bottom of panel */}
             <ChatInput
               onSend={onSendChat || (() => {})}
               disabled={chatLoading}
@@ -287,13 +319,10 @@ export default function Workbench({
           <AgentOutputPanel
             session={agentSession}
             isRunning={agentRunning}
-            canResume={canResumeAgent}
             outputHistory={agentOutput}
             keyInfos={agentKeyInfos}
             onStart={onStartAgent || (() => {})}
             onStop={onStopAgent || (() => {})}
-            onPause={onPauseAgent}
-            onResume={onResumeAgent}
             onSendInput={onSendAgentInput}
           />
         )}
@@ -333,52 +362,39 @@ export default function Workbench({
         )}
       </div>
 
-      {/* Stage List */}
-      <div className="p-4 border-t border-gray-700 max-h-48 overflow-y-auto">
-        <h3 className="text-sm font-medium text-gray-300 mb-2">阶段详情</h3>
-        <div className="space-y-2">
-          {task.stages.map((stage, index) => (
-            <div
-              key={stage.id}
-              className={`p-2 rounded text-xs ${
-                stage.status === 'completed'
-                  ? 'bg-green-900/30 border border-green-800'
-                  : stage.status === 'running'
-                  ? 'bg-primary-900/30 border border-primary-800'
-                  : 'bg-gray-800'
-              }`}
-            >
-              <div className="flex items-center justify-between">
-                <span className="text-gray-300">
-                  {index + 1}. {stage.name}
-                </span>
-                <div className="flex items-center gap-2">
-                  <span className="text-gray-500">
-                    {stage.status === 'pending' && '待开始'}
-                    {stage.status === 'running' && '进行中'}
-                    {stage.status === 'completed' && '已完成'}
-                  </span>
-                  {stage.status === 'pending' && onStartStage && (
-                    <button
-                      onClick={() => onStartStage(stage.id)}
-                      className="px-2 py-0.5 text-xs bg-primary-600 hover:bg-primary-700 rounded text-white"
-                    >
-                      开始
-                    </button>
-                  )}
-                  {stage.status === 'running' && onCompleteStage && (
-                    <button
-                      onClick={() => onCompleteStage(stage.id)}
-                      className="px-2 py-0.5 text-xs bg-green-600 hover:bg-green-700 rounded text-white"
-                    >
-                      完成
-                    </button>
-                  )}
-                </div>
-              </div>
-            </div>
-          ))}
+      {/* Bottom Status Bar */}
+      <div className="h-7 border-t border-gray-700 bg-gray-800 flex items-center px-3 text-xs text-gray-400 shrink-0">
+        <div className="flex items-center gap-2">
+          {agentRunning ? (
+            <>
+              <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse"></span>
+              <span className="text-green-400">Agent 运行中</span>
+            </>
+          ) : agentSession ? (
+            <>
+              <span className="w-2 h-2 rounded-full bg-gray-500"></span>
+              <span>Agent 就绪</span>
+            </>
+          ) : (
+            <>
+              <span className="w-2 h-2 rounded-full bg-gray-600"></span>
+              <span>Agent 未启动</span>
+            </>
+          )}
         </div>
+        {agentSession && (
+          <div className="ml-auto flex items-center gap-3">
+            <span className="text-gray-500">{agentSession.agentType}</span>
+            {agentRunning && onStopAgent && (
+              <button
+                onClick={onStopAgent}
+                className="text-red-400 hover:text-red-300 transition-colors"
+              >
+                停止
+              </button>
+            )}
+          </div>
+        )}
       </div>
     </div>
   );

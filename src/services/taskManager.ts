@@ -24,6 +24,10 @@ export interface Task {
   status: 'idle' | 'running' | 'completed' | 'error';
   basePath: string;
   createdAt: string;
+  /** 是否处于用户确认模式（回退后进入，需用户手动确认才推进） */
+  confirmationMode?: boolean;
+  /** 已完成的阶段输出文件路径（用于检测自动推进） */
+  completedOutputs?: string[];
 }
 
 export class TaskManager {
@@ -131,6 +135,8 @@ export class TaskManager {
       basePath: task.basePath,
       createdAt: task.createdAt,
       currentStageId: task.currentStageId,
+      confirmationMode: task.confirmationMode,
+      completedOutputs: task.completedOutputs,
       workflow: task.workflow,
       stages: task.stages.map((s) => ({ id: s.id, name: s.name, status: s.status })),
     };
@@ -192,6 +198,8 @@ export class TaskManager {
       basePath: task.basePath,
       createdAt: task.createdAt,
       currentStageId: task.currentStageId,
+      confirmationMode: task.confirmationMode,
+      completedOutputs: task.completedOutputs,
       workflow: task.workflow,
       stages: task.stages.map((s) => ({
         id: s.id,
@@ -232,6 +240,10 @@ export class TaskManager {
         basePath: String(item.basePath),
         createdAt: String(item.createdAt),
         currentStageId: item.currentStageId ? String(item.currentStageId) : undefined,
+        confirmationMode: item.confirmationMode === true,
+        completedOutputs: Array.isArray(item.completedOutputs)
+          ? (item.completedOutputs as string[])
+          : undefined,
         workflow,
         stages: workflow.stages.map((ws) => ({
           id: ws.id,
@@ -341,6 +353,94 @@ export class TaskManager {
     }
 
     return { ...task, stages: [...task.stages] };
+  }
+
+  // Rollback to a previous stage: reset current and subsequent stages to pending
+  async rollbackStage(taskId: string, targetStageId: string): Promise<Task | undefined> {
+    const task = this.tasks.get(taskId);
+    if (!task) return undefined;
+
+    const targetIndex = task.stages.findIndex((s) => s.id === targetStageId);
+    if (targetIndex === -1) return undefined;
+
+    // Reset target stage and all subsequent stages to pending
+    for (let i = targetIndex; i < task.stages.length; i++) {
+      task.stages[i].status = 'pending';
+      task.stages[i].errorMessage = undefined;
+    }
+
+    // Set target stage to running
+    task.stages[targetIndex].status = 'running';
+    task.currentStageId = targetStageId;
+    task.status = 'running';
+    task.confirmationMode = true; // Enter user confirmation mode after rollback
+
+    await this.writeTaskConfig(task);
+
+    return { ...task, stages: [...task.stages] };
+  }
+
+  // Enable/disable confirmation mode
+  async setConfirmationMode(taskId: string, enabled: boolean): Promise<Task | undefined> {
+    const task = this.tasks.get(taskId);
+    if (!task) return undefined;
+
+    task.confirmationMode = enabled;
+    await this.writeTaskConfig(task);
+
+    return { ...task, stages: [...task.stages] };
+  }
+
+  /** Persist agent session context for resume (claude -r style) */
+  async saveSessionContext(
+    taskId: string,
+    context: {
+      agentType: string;
+      messageHistory: Array<{ role: string; content: string }>;
+      stageId: string;
+      timestamp: string;
+    }
+  ): Promise<void> {
+    const task = this.tasks.get(taskId);
+    if (!task) return;
+
+    const sessionPath = await join(task.basePath, '.cospace', 'session.json');
+    await invoke('write_text_file_command', {
+      path: sessionPath,
+      content: JSON.stringify(context, null, 2),
+    });
+  }
+
+  /** Load agent session context for resume */
+  async loadSessionContext(taskId: string): Promise<{
+    agentType: string;
+    messageHistory: Array<{ role: string; content: string }>;
+    stageId: string;
+    timestamp: string;
+  } | null> {
+    const task = this.tasks.get(taskId);
+    if (!task) return null;
+
+    try {
+      const sessionPath = await join(task.basePath, '.cospace', 'session.json');
+      const content = await invoke<string>('read_text_file_command', { path: sessionPath });
+      return JSON.parse(content);
+    } catch {
+      return null;
+    }
+  }
+
+  /** Clear session context */
+  async clearSessionContext(taskId: string): Promise<void> {
+    const task = this.tasks.get(taskId);
+    if (!task) return;
+
+    try {
+      const sessionPath = await join(task.basePath, '.cospace', 'session.json');
+      await invoke('write_text_file_command', { path: sessionPath, content: '{}' });
+    } catch {
+      // ignore
+    }
   }
 
   // Generate Markdown output files for a stage (structured for Agent execution)

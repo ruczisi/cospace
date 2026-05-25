@@ -38,7 +38,8 @@
       "icons/icon.ico"
     ],
     "resources": {
-      "templates/*": "templates/"
+      "templates/*": "templates/",
+      "agent-bridge/dist/bundle.js": "agent-bridge/dist/bundle.js"
     },
     "windows": {
       "webviewInstallMode": {

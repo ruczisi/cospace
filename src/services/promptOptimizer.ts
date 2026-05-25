@@ -130,6 +130,22 @@ function buildPromptText(
   parts.push('2. 使用 Markdown 格式');
   parts.push('3. 关键数据需标注来源');
   parts.push('4. 完成后报告文件写入路径');
+  parts.push('');
+
+  // Interaction guidance — require agent to proactively ask questions
+  parts.push(`## 交互要求`);
+  parts.push('**重要**：在开始具体工作前，请先主动向用户确认需要收集的关键信息。');
+  parts.push('1. 不要假设任何信息，逐条向用户提问');
+  parts.push('2. 每收到一条信息，简要确认并继续问下一个问题');
+  parts.push('3. 当信息收集完整、阶段产物完成后，告知用户："本阶段已完成，请审阅产物并输入\'确认\'以继续下一阶段。"');
+  parts.push('4. 如果用户已提供足够信息，可直接开始产出');
+  parts.push('');
+  parts.push('## 输出规范（严格遵循）');
+  parts.push('- **直接输出**：只输出给用户的最终回复内容，禁止输出思考过程、内部分析、计划步骤');
+  parts.push('- **禁止重复**：不要重复用户已经提供过的信息或系统已告知你的背景');
+  parts.push('- **简洁确认**：收到用户信息后，用一句话简要确认即可，不要展开复述');
+  parts.push('- **禁止元评论**：不要以"我需要...""我会...""让我..."开头描述你的行动计划');
+  parts.push('- **一问一答**：每次只问用户一个问题，等待回答后再问下一个');
 
   return parts.join('\n');
 }

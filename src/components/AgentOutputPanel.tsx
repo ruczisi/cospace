@@ -4,26 +4,20 @@ import type { AgentKeyInfo, AgentSession } from '../services/agentRunner';
 interface AgentOutputPanelProps {
   session: AgentSession | null;
   isRunning: boolean;
-  canResume?: boolean;
   outputHistory: string[];
   keyInfos: AgentKeyInfo[];
   onStart: () => void;
   onStop: () => void;
-  onPause?: () => void;
-  onResume?: () => void;
   onSendInput?: (input: string) => void;
 }
 
 export default function AgentOutputPanel({
   session,
   isRunning,
-  canResume = false,
   outputHistory,
   keyInfos,
   onStart,
   onStop,
-  onPause,
-  onResume,
   onSendInput,
 }: AgentOutputPanelProps) {
   const [showDetails, setShowDetails] = useState(false);
@@ -66,37 +60,19 @@ export default function AgentOutputPanel({
         </div>
         <div className="flex items-center gap-2">
           {!isRunning ? (
-            canResume && onResume ? (
-              <button
-                onClick={onResume}
-                className="px-3 py-1.5 text-xs bg-yellow-600 hover:bg-yellow-700 rounded text-white"
-              >
-                恢复 Agent
-              </button>
-            ) : (
-              <button
-                onClick={onStart}
-                className="px-3 py-1.5 text-xs bg-primary-600 hover:bg-primary-700 rounded text-white"
-              >
-                启动 Agent
-              </button>
-            )
+            <button
+              onClick={onStart}
+              className="px-3 py-1.5 text-xs bg-primary-600 hover:bg-primary-700 rounded text-white"
+            >
+              启动 Agent
+            </button>
           ) : (
-            <>
-              <button
-                onClick={onPause}
-                disabled={!onPause}
-                className="px-3 py-1.5 text-xs bg-yellow-600 hover:bg-yellow-700 disabled:bg-gray-700 rounded text-white"
-              >
-                暂停
-              </button>
-              <button
-                onClick={onStop}
-                className="px-3 py-1.5 text-xs bg-red-600 hover:bg-red-700 rounded text-white"
-              >
-                停止
-              </button>
-            </>
+            <button
+              onClick={onStop}
+              className="px-3 py-1.5 text-xs bg-red-600 hover:bg-red-700 rounded text-white"
+            >
+              停止
+            </button>
           )}
           <button
             onClick={() => setShowDetails(!showDetails)}

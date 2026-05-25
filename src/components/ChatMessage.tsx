@@ -1,8 +1,11 @@
+import { useState } from 'react';
+
 export interface ChatMessageData {
   id: string;
   role: 'user' | 'assistant' | 'system';
   content: string;
   timestamp: number;
+  thinking?: string;
 }
 
 interface ChatMessageProps {
@@ -12,6 +15,7 @@ interface ChatMessageProps {
 export default function ChatMessage({ message }: ChatMessageProps) {
   const isUser = message.role === 'user';
   const isSystem = message.role === 'system';
+  const [showThinking, setShowThinking] = useState(false);
 
   const timeStr = new Date(message.timestamp).toLocaleTimeString('zh-CN', {
     hour: '2-digit',
@@ -50,8 +54,27 @@ export default function ChatMessage({ message }: ChatMessageProps) {
               : 'bg-gray-800 text-gray-200 rounded-bl-none border border-gray-700'
           }`}
         >
-          {message.content}
+          <span className="break-words whitespace-pre-wrap">{message.content}</span>
         </div>
+
+        {/* Thinking panel */}
+        {!isUser && message.thinking && (
+          <div className="mt-1">
+            <button
+              onClick={() => setShowThinking(!showThinking)}
+              className="flex items-center gap-1 text-[11px] text-gray-500 hover:text-gray-400 transition-colors"
+            >
+              <span>{showThinking ? '▼' : '▶'}</span>
+              <span>思考过程</span>
+              <span className="text-gray-600">({message.thinking.length} 字)</span>
+            </button>
+            {showThinking && (
+              <div className="mt-1 px-2 py-1.5 bg-gray-900/80 border border-gray-800 rounded text-xs text-gray-500 whitespace-pre-wrap font-mono leading-relaxed">
+                {message.thinking}
+              </div>
+            )}
+          </div>
+        )}
       </div>
     </div>
   );

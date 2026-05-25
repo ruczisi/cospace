@@ -3,26 +3,21 @@ import { invoke } from '@tauri-apps/api/core';
 import { useState, useEffect } from 'react';
 
 export type AgentOption = {
-  type: 'builtin' | 'claude' | 'codex' | 'custom';
+  type: 'claude' | 'codex' | 'custom';
   label: string;
   description: string;
 };
 
 const AGENT_OPTIONS: AgentOption[] = [
   {
-    type: 'builtin',
-    label: '内置 LLM（推荐）',
-    description: '直接调用配置的 LLM API，无需安装外部工具',
-  },
-  {
     type: 'claude',
-    label: 'Claude Code CLI',
-    description: '通过 PTY 启动本地安装的 Claude Code',
+    label: 'Claude Code CLI（推荐）',
+    description: '通过 Claude Agent SDK 启动本地安装的 Claude Code',
   },
   {
     type: 'codex',
     label: 'Codex CLI',
-    description: '通过 PTY 启动本地安装的 Codex',
+    description: '通过 SDK 启动本地安装的 Codex',
   },
   {
     type: 'custom',

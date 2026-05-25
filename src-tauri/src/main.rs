@@ -2,7 +2,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
-use portable_pty::{Child, CommandBuilder, PtyPair, PtySize, native_pty_system};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -96,16 +95,36 @@ pub struct ClaudeConversation {
     pub message_count: u32,
 }
 
-pub struct SessionSlot {
-    pub pty_pair: Option<PtyPair>,
-    pub child: Option<Box<dyn Child + Send>>,
-    pub writer: Option<Box<dyn std::io::Write + Send>>,
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentOutputEvent {
+    pub task_id: String,
+    pub data: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentThinkingEvent {
+    pub task_id: String,
+    pub data: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentExitEvent {
+    pub task_id: String,
+    pub code: i32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BridgeEvent {
+    #[serde(rename = "type")]
+    pub event_type: String,
+    pub data: String,
 }
 
 pub struct AppState {
     pub watcher: Mutex<Option<RecommendedWatcher>>,
     pub watched_path: Mutex<Option<String>>,
-    pub sessions: Mutex<HashMap<String, SessionSlot>>,
+    pub bridge_port: Mutex<Option<u16>>,
+    pub bridge_process: Mutex<Option<tokio::process::Child>>,
 }
 
 impl Default for AppState {
@@ -113,9 +132,41 @@ impl Default for AppState {
         Self {
             watcher: Mutex::new(None),
             watched_path: Mutex::new(None),
-            sessions: Mutex::new(HashMap::new()),
+            bridge_port: Mutex::new(None),
+            bridge_process: Mutex::new(None),
         }
     }
+}
+
+/// Format a bridge status event into a concise human-readable string.
+/// Returns None for events that should be silently dropped (keep_alive, etc.).
+fn format_status_event(data: &str) -> Option<String> {
+    let json: serde_json::Value = serde_json::from_str(data).ok()?;
+
+    // Task notification
+    if let Some(status) = json.get("notification").and_then(|v| v.as_bool()) {
+        if status {
+            let title = json.get("title").and_then(|v| v.as_str()).unwrap_or("通知");
+            let message = json.get("message").and_then(|v| v.as_str()).unwrap_or("");
+            if message.is_empty() {
+                return Some(format!("📋 {}", title));
+            }
+            return Some(format!("📋 {} · {}", title, message));
+        }
+    }
+
+    // Init status (session_id, model, tools) — shown in bottom status bar, don't show in chat
+    if json.get("session_id").and_then(|v| v.as_str()).is_some() {
+        return None;
+    }
+
+    // Permission mode change — internal detail, don't show in chat
+    if json.get("permissionMode").and_then(|v| v.as_str()).is_some() {
+        return None;
+    }
+
+    // keep_alive and other noise — silently drop
+    None
 }
 
 #[tauri::command]
@@ -251,35 +302,6 @@ fn find_agent_in_path(agent_type: AgentType) -> Result<Option<String>, String> {
     Ok(None)
 }
 
-fn get_default_shell() -> String {
-    #[cfg(target_os = "windows")]
-    {
-        let ps = std::env::var_os("PROGRAMFILES")
-            .map(|p| {
-                let mut path = std::path::PathBuf::from(p);
-                path.push("PowerShell");
-                path.push("7");
-                path.push("pwsh.exe");
-                if path.exists() {
-                    return path.to_string_lossy().to_string();
-                }
-                let sys_root = std::env::var_os("SYSTEMROOT").unwrap_or_default();
-                let mut win_ps = std::path::PathBuf::from(sys_root);
-                win_ps.push("System32");
-                win_ps.push("WindowsPowerShell");
-                win_ps.push("v1.0");
-                win_ps.push("powershell.exe");
-                return win_ps.to_string_lossy().to_string();
-            })
-            .unwrap_or_else(|| "cmd.exe".to_string());
-        ps
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string())
-    }
-}
-
 /// Get the resource path where bundled assets are stored
 #[tauri::command]
 fn get_resource_path(app: AppHandle) -> Result<String, String> {
@@ -298,171 +320,408 @@ fn get_cwd() -> Result<String, String> {
         .map_err(|e| e.to_string())
 }
 
-// ===== Multi-Session PTY Commands =====
+// ===== Agent Bridge Integration =====
 
+/// Start the Node.js agent bridge and return its port.
 #[tauri::command]
-async fn create_session(
+async fn start_agent_bridge(
     app: AppHandle,
     state: State<'_, AppState>,
-    session_id: String,
-    working_dir: Option<String>,
-) -> Result<String, String> {
-    let pty_system = native_pty_system();
-    let pair = pty_system
-        .openpty(PtySize {
-            rows: 24,
-            cols: 80,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
-        .map_err(|e| e.to_string())?;
-
-    let shell_exe = get_default_shell();
-    log::info!("[Cospace] create_session {} shell: {}", session_id, shell_exe);
-
-    let mut cmd = CommandBuilder::new(&shell_exe);
-    if let Some(dir) = &working_dir {
-        cmd.cwd(std::path::PathBuf::from(dir));
+) -> Result<u16, String> {
+    // Check if bridge is already running
+    {
+        let port_guard = state.bridge_port.lock().await;
+        if let Some(port) = *port_guard {
+            // Health check
+            let client = reqwest::Client::builder().no_proxy().build().unwrap_or_else(|_| reqwest::Client::new());
+            match client
+                .get(format!("http://127.0.0.1:{}/health", port))
+                .timeout(Duration::from_secs(2))
+                .send()
+                .await
+            {
+                Ok(resp) if resp.status().is_success() => return Ok(port),
+                _ => {}
+            }
+        }
     }
 
-    let child = pair.slave.spawn_command(cmd).map_err(|e| {
-        log::error!("[Cospace] create_session {} spawn failed: {}", session_id, e);
-        e.to_string()
-    })?;
+    // Kill any existing bridge process
+    {
+        let mut proc_guard = state.bridge_process.lock().await;
+        if let Some(mut child) = proc_guard.take() {
+            let _ = child.start_kill();
+        }
+    }
 
-    let reader = pair
-        .master
-        .try_clone_reader()
-        .map_err(|e| e.to_string())?;
-    let writer = pair.master.take_writer().map_err(|e| e.to_string())?;
-
-    let slot = SessionSlot {
-        pty_pair: Some(pair),
-        child: Some(child),
-        writer: Some(writer),
+    // Find node executable
+    let node_exe = if cfg!(target_os = "windows") {
+        "node.exe"
+    } else {
+        "node"
     };
 
+    // Verify Node.js is available
+    let node_check = tokio::process::Command::new(node_exe)
+        .arg("--version")
+        .output()
+        .await;
+    if node_check.is_err() || !node_check.as_ref().unwrap().status.success() {
+        return Err(
+            "Node.js 未安装或不在 PATH 中。Agent Bridge 需要 Node.js 20+ 才能运行。\n\
+             请从 https://nodejs.org/ 安装 Node.js。".to_string()
+        );
+    }
+
+    // Determine bridge script path
+    // In dev: use src-tauri/agent-bridge/dist/index.js (relative to project root)
+    // In prod: use bundled resource path
+    let bridge_script = if cfg!(debug_assertions) {
+        let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+        // In dev, cwd is the src-tauri directory (where Cargo.toml lives)
+        cwd.join("agent-bridge").join("dist").join("index.js")
+    } else {
+        let resource_dir = app
+            .path()
+            .resource_dir()
+            .map_err(|e| e.to_string())?;
+        resource_dir.join("agent-bridge").join("dist").join("bundle.js")
+    };
+
+    if !bridge_script.exists() {
+        return Err(format!(
+            "Agent bridge not found at {}. Please build it first: cd src-tauri/agent-bridge && npm install && npm run build",
+            bridge_script.display()
+        ));
+    }
+
+    log::info!("[Cospace] Starting agent bridge: {} {}", node_exe, bridge_script.display());
+
+    let mut cmd = tokio::process::Command::new(node_exe);
+    cmd.arg(&bridge_script)
+        .env("NO_COLOR", "1")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+
+    let mut child = cmd.spawn().map_err(|e| {
+        format!("Failed to spawn agent bridge: {}. Is Node.js installed?", e)
+    })?;
+
+    let stdout = child.stdout.take().ok_or("Failed to capture bridge stdout")?;
+    let stderr = child.stderr.take();
+
+    // Spawn stdout reader that finds the port and keeps draining to prevent EPIPE
+    let (port_tx, port_rx) = tokio::sync::oneshot::channel::<u16>();
+
+    tokio::spawn(async move {
+        use tokio::io::{AsyncBufReadExt, BufReader};
+        let reader = BufReader::new(stdout);
+        let mut lines = reader.lines();
+        let mut port_tx = Some(port_tx);
+
+        while let Ok(Some(line)) = lines.next_line().await {
+            log::info!("[Bridge stdout] {}", line);
+            if let Some(port_str) = line.trim().strip_prefix("[bridge] Ready on port ") {
+                if let Ok(p) = port_str.parse::<u16>() {
+                    if let Some(tx) = port_tx.take() {
+                        let _ = tx.send(p);
+                    }
+                }
+            }
+        }
+    });
+
+    // Wait for port with timeout
+    let timeout = tokio::time::Duration::from_secs(10);
+    let port = match tokio::time::timeout(timeout, port_rx).await {
+        Ok(Ok(p)) => p,
+        Ok(Err(_)) => {
+            let _ = child.start_kill();
+            return Err("Agent bridge port channel closed unexpectedly".to_string());
+        }
+        Err(_) => {
+            let _ = child.start_kill();
+            return Err("Agent bridge failed to start within 10 seconds".to_string());
+        }
+    };
+
+    // Store the process and port
     {
-        let mut sessions = state.sessions.lock().await;
-        sessions.insert(session_id.clone(), slot);
+        let mut proc_guard = state.bridge_process.lock().await;
+        *proc_guard = Some(child);
+    }
+    {
+        let mut port_guard = state.bridge_port.lock().await;
+        *port_guard = Some(port);
+    }
+
+    // Spawn stderr reader
+    if let Some(stderr) = stderr {
+        tokio::spawn(async move {
+            use tokio::io::{AsyncBufReadExt, BufReader};
+            let reader = BufReader::new(stderr);
+            let mut lines = reader.lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                if !line.trim().is_empty() {
+                    log::info!("[Bridge stderr] {}", line);
+                }
+            }
+        });
+    }
+
+    log::info!("[Cospace] Agent bridge ready on port {}", port);
+    Ok(port)
+}
+
+/// Stop the agent bridge.
+#[tauri::command]
+async fn stop_agent_bridge(state: State<'_, AppState>) -> Result<(), String> {
+    {
+        let mut port_guard = state.bridge_port.lock().await;
+        *port_guard = None;
+    }
+    {
+        let mut proc_guard = state.bridge_process.lock().await;
+        if let Some(mut child) = proc_guard.take() {
+            let _ = child.start_kill();
+        }
+    }
+    Ok(())
+}
+
+/// Forward SSE events from the bridge to the frontend via Tauri events.
+async fn forward_bridge_events(
+    app: AppHandle,
+    task_id: String,
+    stream: reqwest::Response,
+) {
+    use futures_util::StreamExt;
+
+    let mut byte_stream = stream.bytes_stream();
+    let mut buffer = String::new();
+
+    while let Some(chunk_result) = byte_stream.next().await {
+        match chunk_result {
+            Ok(chunk) => {
+                buffer.push_str(&String::from_utf8_lossy(&chunk));
+
+                // Process complete SSE lines
+                while let Some(line_end) = buffer.find("\n\n") {
+                    let frame = buffer[..line_end].to_string();
+                    buffer = buffer[line_end + 2..].to_string();
+
+                    // Parse "data: {...}"
+                    if let Some(data_line) = frame.lines().find(|l| l.starts_with("data:")) {
+                        let json_str = data_line[5..].trim();
+                        match serde_json::from_str::<BridgeEvent>(json_str) {
+                            Ok(event) => {
+                                match event.event_type.as_str() {
+                                    "text" | "tool_output" => {
+                                        let _ = app.emit(
+                                            "agent-output",
+                                            AgentOutputEvent {
+                                                task_id: task_id.clone(),
+                                                data: event.data,
+                                            },
+                                        );
+                                    }
+                                    "thinking" => {
+                                        let _ = app.emit(
+                                            "agent-thinking",
+                                            AgentThinkingEvent {
+                                                task_id: task_id.clone(),
+                                                data: event.data,
+                                            },
+                                        );
+                                    }
+                                    "tool_use" | "tool_result" | "mode_changed" => {
+                                        // Technical events — log only, don't show in chat
+                                        log::debug!("[Cospace] Bridge {}: {}", event.event_type, event.data);
+                                    }
+                                    "status" => {
+                                        let display = format_status_event(&event.data);
+                                        if let Some(text) = display {
+                                            let _ = app.emit(
+                                                "agent-output",
+                                                AgentOutputEvent {
+                                                    task_id: task_id.clone(),
+                                                    data: text,
+                                                },
+                                            );
+                                        }
+                                        // keep_alive and other noise is silently dropped
+                                    }
+                                    "result" | "done" => {
+                                        // Session lifecycle events — don't emit to chat UI
+                                        log::info!("[Cospace] Bridge session {}: {}", event.event_type, event.data);
+                                        let _ = app.emit(
+                                            "agent-exit",
+                                            AgentExitEvent {
+                                                task_id: task_id.clone(),
+                                                code: 0,
+                                            },
+                                        );
+                                        if event.event_type == "done" {
+                                            return;
+                                        }
+                                    }
+                                    "error" => {
+                                        let _ = app.emit(
+                                            "agent-output",
+                                            AgentOutputEvent {
+                                                task_id: task_id.clone(),
+                                                data: format!("[Error] {}", event.data),
+                                            },
+                                        );
+                                        let _ = app.emit(
+                                            "agent-exit",
+                                            AgentExitEvent {
+                                                task_id: task_id.clone(),
+                                                code: 1,
+                                            },
+                                        );
+                                        return;
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            Err(e) => {
+                                log::warn!("[Cospace] Failed to parse bridge event: {} | raw: {}", e, json_str);
+                            }
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                log::error!("[Cospace] SSE stream error for {}: {}", task_id, e);
+                let _ = app.emit(
+                    "agent-exit",
+                    AgentExitEvent {
+                        task_id: task_id.clone(),
+                        code: 1,
+                    },
+                );
+                return;
+            }
+        }
+    }
+
+    // Stream ended normally
+    let _ = app.emit(
+        "agent-exit",
+        AgentExitEvent {
+            task_id: task_id.clone(),
+            code: 0,
+        },
+    );
+}
+
+#[tauri::command]
+async fn agent_start(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    task_id: String,
+    working_dir: String,
+    prompt: String,
+    agent_type: String,
+    custom_command: Option<String>,
+) -> Result<String, String> {
+    // Ensure bridge is running
+    let port = start_agent_bridge(app.clone(), state.clone()).await?;
+
+    let client = reqwest::Client::builder().no_proxy().build().unwrap_or_else(|_| reqwest::Client::new());
+
+    // Build request body
+    let body = serde_json::json!({
+        "taskId": task_id,
+        "workingDir": working_dir,
+        "prompt": prompt,
+        "agentType": agent_type,
+        "customCommand": custom_command,
+    });
+
+    // Send POST to /sessions with SSE response
+    let response = client
+        .post(format!("http://127.0.0.1:{}/sessions", port))
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to start agent session: {}", e))?;
+
+    let status = response.status();
+    if !status.is_success() {
+        let err_text = response.text().await.unwrap_or_default();
+        log::error!("[Cospace] Agent session start failed with HTTP {}: {}", status, err_text);
+        return Err(format!("Agent session start failed (HTTP {}): {}", status, err_text));
+    }
+
+    // Spawn SSE forwarder
+    let app_clone = app.clone();
+    let tid = task_id.clone();
+    tokio::spawn(async move {
+        forward_bridge_events(app_clone, tid, response).await;
+    });
+
+    Ok(task_id)
+}
+
+#[tauri::command]
+async fn agent_send(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    task_id: String,
+    prompt: String,
+) -> Result<String, String> {
+    let port = {
+        let port_guard = state.bridge_port.lock().await;
+        port_guard.ok_or("Agent bridge not running. Please start a session first.")?
+    };
+
+    let client = reqwest::Client::builder().no_proxy().build().unwrap_or_else(|_| reqwest::Client::new());
+
+    let body = serde_json::json!({
+        "prompt": prompt,
+    });
+
+    let response = client
+        .post(format!("http://127.0.0.1:{}/sessions/{}/message", port, task_id))
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to send message: {}", e))?;
+
+    if !response.status().is_success() {
+        let err_text = response.text().await.unwrap_or_default();
+        return Err(format!("Send message failed: {}", err_text));
     }
 
     let app_clone = app.clone();
-    let sid = session_id.clone();
+    let tid = task_id.clone();
     tokio::spawn(async move {
-        use std::io::Read;
-        let mut reader = reader;
-        let mut buf = [0u8; 4096];
-        loop {
-            match reader.read(&mut buf) {
-                Ok(0) => {
-                    log::info!("[Cospace] session {} reader EOF", sid);
-                    let _ = app_clone.emit(
-                        "session-output",
-                        SessionOutput {
-                            session_id: sid.clone(),
-                            data: String::new(),
-                        },
-                    );
-                    break;
-                }
-                Ok(n) => {
-                    let output = String::from_utf8_lossy(&buf[..n]).to_string();
-                    let _ = app_clone.emit(
-                        "session-output",
-                        SessionOutput {
-                            session_id: sid.clone(),
-                            data: output,
-                        },
-                    );
-                }
-                Err(e) => {
-                    log::error!("[Cospace] session {} reader error: {}", sid, e);
-                    break;
-                }
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        let _ = app_clone.emit(
-            "session-exit",
-            SessionExit {
-                session_id: sid,
-                code: 0,
-            },
-        );
+        forward_bridge_events(app_clone, tid, response).await;
     });
 
-    Ok(session_id)
+    Ok(task_id)
 }
 
 #[tauri::command]
-async fn destroy_session(
+async fn agent_stop(
     state: State<'_, AppState>,
-    session_id: String,
-) -> Result<String, String> {
-    let mut sessions = state.sessions.lock().await;
-    if let Some(mut slot) = sessions.remove(&session_id) {
-        if let Some(mut child) = slot.child.take() {
-            let _ = child.kill();
-        }
-        slot.writer = None;
-        slot.pty_pair = None;
-        log::info!("[Cospace] Session {} destroyed", session_id);
-        Ok(format!("Session {} destroyed", session_id))
-    } else {
-        Err(format!("Session {} not found", session_id))
-    }
-}
-
-#[tauri::command]
-async fn write_to_session(
-    state: State<'_, AppState>,
-    session_id: String,
-    data: String,
+    task_id: String,
 ) -> Result<(), String> {
-    use std::io::Write;
-    let mut sessions = state.sessions.lock().await;
-    if let Some(slot) = sessions.get_mut(&session_id) {
-        if let Some(ref mut writer) = slot.writer {
-            writer.write_all(data.as_bytes()).map_err(|e| e.to_string())?;
-            writer.flush().map_err(|e| e.to_string())?;
-            Ok(())
-        } else {
-            Err("Session writer not available".to_string())
-        }
-    } else {
-        Err(format!("Session {} not found", session_id))
-    }
-}
+    let port = {
+        let port_guard = state.bridge_port.lock().await;
+        port_guard.ok_or("Agent bridge not running")?
+    };
 
-#[tauri::command]
-async fn resize_session(
-    state: State<'_, AppState>,
-    session_id: String,
-    rows: u16,
-    cols: u16,
-) -> Result<(), String> {
-    let mut sessions = state.sessions.lock().await;
-    if let Some(slot) = sessions.get_mut(&session_id) {
-        if let Some(ref pair) = slot.pty_pair {
-            pair.master
-                .resize(PtySize {
-                    rows,
-                    cols,
-                    pixel_width: 0,
-                    pixel_height: 0,
-                })
-                .map_err(|e| e.to_string())?;
-            return Ok(());
-        }
-    }
-    Err(format!("Session {} not found", session_id))
-}
+    let client = reqwest::Client::builder().no_proxy().build().unwrap_or_else(|_| reqwest::Client::new());
+    let _ = client
+        .delete(format!("http://127.0.0.1:{}/sessions/{}", port, task_id))
+        .send()
+        .await;
 
-#[tauri::command]
-async fn list_sessions(state: State<'_, AppState>) -> Result<Vec<String>, String> {
-    let sessions = state.sessions.lock().await;
-    Ok(sessions.keys().cloned().collect())
+    Ok(())
 }
 
 /// Quick line count for a file by counting newline bytes.
@@ -594,7 +853,7 @@ fn process_jsonl_file(path: &std::path::Path, conversations: &mut Vec<ClaudeConv
         name,
         updated_at,
         message_count,
-    });
+    })
 }
 
 #[tauri::command]
@@ -681,11 +940,11 @@ fn main() {
             find_agent_in_path,
             get_resource_path,
             get_cwd,
-            create_session,
-            destroy_session,
-            write_to_session,
-            resize_session,
-            list_sessions,
+            start_agent_bridge,
+            stop_agent_bridge,
+            agent_start,
+            agent_send,
+            agent_stop,
             scan_conversations,
             // Config commands
             resolve_path_command,

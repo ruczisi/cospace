@@ -11,7 +11,11 @@
     "test": "vitest run",
     "test:unit": "vitest run tests/unit",
     "test:e2e": "playwright test tests/e2e",
-    "test:ui": "vitest --ui"
+    "test:ui": "vitest --ui",
+    "bridge:build": "cd src-tauri/agent-bridge && npm install && npm run build",
+    "bridge:dev": "cd src-tauri/agent-bridge && npm install && npm run dev",
+    "predev": "npm run bridge:build",
+    "prebuild": "npm run bridge:build"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.11.0",
