@@ -43,3 +43,14 @@ run.bat
 # AI assistant temp files
 .omc/
 .harness/
+
+# Temporary build scripts (local dev only, not for repo)
+src-tauri/build*.bat
+src-tauri/build*.cmd
+src-tauri/build*.ps1
+src-tauri/build*.rs
+src-tauri/msvc-build*.bat
+src-tauri/msvc-build*.cmd
+src-tauri/pure-build*.bat
+src-tauri/rebuild*.ps1
+src-tauri/tauri-build*.ps1
